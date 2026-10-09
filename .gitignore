@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Executables & Binaries
+*.exe
+*.pdb
+*.dll
+*.so
+*.dylib
+
+# System & IDEs
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
