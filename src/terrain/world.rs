@@ -13,7 +13,7 @@ impl TerrainWorld {
         Self {
             generator: TerrainGenerator::new(seed),
             chunk_size: 64.0,
-            chunk_resolution: 32, // 32x32 quads par chunk pour fluidite immediate
+            chunk_resolution: 36, // 36x36 quads par chunk pour un maillage haute définition très fin
             view_distance_chunks: 3, // Rayon de 3 chunks => grille de 7x7 chunks = 448m x 448m
         }
     }

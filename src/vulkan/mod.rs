@@ -9,7 +9,7 @@ pub mod texture;
 pub use allocator::GpuAllocator;
 pub use buffer::GpuBuffer;
 pub use context::VulkanContext;
-pub use pipeline::VulkanPipeline;
+pub use pipeline::{SkyPipeline, VegetationPipeline, VulkanPipeline, WaterPipeline};
 pub use swapchain::VulkanSwapchain;
 pub use sync::SyncObjects;
 pub use texture::VulkanTextureArray;

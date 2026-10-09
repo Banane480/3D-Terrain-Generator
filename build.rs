@@ -33,23 +33,26 @@ fn compile_glsl_to_spv(source: &str, stage: naga::ShaderStage, name: &str) -> Ve
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=shaders/terrain.vert");
-    println!("cargo:rerun-if-changed=shaders/terrain.frag");
+    let shaders = [
+        ("shaders/terrain.vert", naga::ShaderStage::Vertex, "terrain_vert.spv"),
+        ("shaders/terrain.frag", naga::ShaderStage::Fragment, "terrain_frag.spv"),
+        ("shaders/vegetation.vert", naga::ShaderStage::Vertex, "vegetation_vert.spv"),
+        ("shaders/vegetation.frag", naga::ShaderStage::Fragment, "vegetation_frag.spv"),
+        ("shaders/sky.vert", naga::ShaderStage::Vertex, "sky_vert.spv"),
+        ("shaders/sky.frag", naga::ShaderStage::Fragment, "sky_frag.spv"),
+        ("shaders/water.vert", naga::ShaderStage::Vertex, "water_vert.spv"),
+        ("shaders/water.frag", naga::ShaderStage::Fragment, "water_frag.spv"),
+    ];
 
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR non defini");
     let out_path = PathBuf::from(out_dir);
 
-    // Vertex shader
-    let vert_src = fs::read_to_string("shaders/terrain.vert")
-        .expect("Impossible de lire shaders/terrain.vert");
-    let vert_spv = compile_glsl_to_spv(&vert_src, naga::ShaderStage::Vertex, "terrain.vert");
-    fs::write(out_path.join("terrain_vert.spv"), vert_spv)
-        .expect("Impossible d'ecrire terrain_vert.spv");
-
-    // Fragment shader
-    let frag_src = fs::read_to_string("shaders/terrain.frag")
-        .expect("Impossible de lire shaders/terrain.frag");
-    let frag_spv = compile_glsl_to_spv(&frag_src, naga::ShaderStage::Fragment, "terrain.frag");
-    fs::write(out_path.join("terrain_frag.spv"), frag_spv)
-        .expect("Impossible d'ecrire terrain_frag.spv");
+    for (file_path, stage, out_name) in shaders {
+        println!("cargo:rerun-if-changed={}", file_path);
+        let src = fs::read_to_string(file_path)
+            .unwrap_or_else(|_| panic!("Impossible de lire {}", file_path));
+        let spv = compile_glsl_to_spv(&src, stage, file_path);
+        fs::write(out_path.join(out_name), spv)
+            .unwrap_or_else(|_| panic!("Impossible d'ecrire {}", out_name));
+    }
 }

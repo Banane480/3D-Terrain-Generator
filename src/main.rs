@@ -1,6 +1,8 @@
 mod camera;
+mod environment;
 mod input;
 mod terrain;
+mod vegetation;
 mod vulkan;
 
 use std::time::Instant;
@@ -14,11 +16,13 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowAttributes, WindowId};
 
 use crate::camera::{Camera, CameraUniform};
+use crate::environment::{SkyMesh, WaterMesh};
 use crate::input::InputState;
 use crate::terrain::TerrainWorld;
+use crate::vegetation::{VegetationMesh, VegetationSpawner};
 use crate::vulkan::{
-    GpuAllocator, GpuBuffer, SyncObjects, VulkanContext, VulkanPipeline, VulkanSwapchain,
-    VulkanTextureArray,
+    GpuAllocator, GpuBuffer, SkyPipeline, SyncObjects, VegetationPipeline,
+    VulkanContext, VulkanPipeline, VulkanSwapchain, VulkanTextureArray, WaterPipeline,
 };
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
@@ -28,11 +32,48 @@ pub struct VulkanRenderer {
     pub allocator: GpuAllocator,
     pub swapchain: VulkanSwapchain,
     pub texture_array: VulkanTextureArray,
-    pub pipeline: VulkanPipeline,
+    pub terrain_pipeline: VulkanPipeline,
+    pub vegetation_pipeline: VegetationPipeline,
+    pub sky_pipeline: SkyPipeline,
+    pub water_pipeline: WaterPipeline,
     pub uniform_buffers: Vec<GpuBuffer>,
-    pub vertex_buffer: GpuBuffer,
-    pub index_buffer: GpuBuffer,
-    pub index_count: u32,
+
+    // Maillage du Terrain
+    pub terrain_vertex_buffer: GpuBuffer,
+    pub terrain_index_buffer: GpuBuffer,
+    pub terrain_index_count: u32,
+
+    // Ciel atmosphérique
+    pub sky_vertex_buffer: GpuBuffer,
+    pub sky_index_buffer: GpuBuffer,
+    pub sky_index_count: u32,
+
+    // Océan / Eau animée
+    pub water_vertex_buffer: GpuBuffer,
+    pub water_index_buffer: GpuBuffer,
+    pub water_index_count: u32,
+
+    // Végétation instanciée (Sapins)
+    pub pine_vertex_buffer: GpuBuffer,
+    pub pine_index_buffer: GpuBuffer,
+    pub pine_index_count: u32,
+    pub pine_instance_buffer: Option<GpuBuffer>,
+    pub pine_instance_count: u32,
+
+    // Végétation instanciée (Arbres feuillus)
+    pub broadleaf_vertex_buffer: GpuBuffer,
+    pub broadleaf_index_buffer: GpuBuffer,
+    pub broadleaf_index_count: u32,
+    pub broadleaf_instance_buffer: Option<GpuBuffer>,
+    pub broadleaf_instance_count: u32,
+
+    // Végétation instanciée (Buissons)
+    pub bush_vertex_buffer: GpuBuffer,
+    pub bush_index_buffer: GpuBuffer,
+    pub bush_index_count: u32,
+    pub bush_instance_buffer: Option<GpuBuffer>,
+    pub bush_instance_count: u32,
+
     pub command_buffers: Vec<vk::CommandBuffer>,
     pub sync_objects: SyncObjects,
     pub current_frame: usize,
@@ -45,11 +86,11 @@ impl VulkanRenderer {
         let allocator = GpuAllocator::new(&context.instance, &context.device, context.physical_device)?;
         let swapchain = VulkanSwapchain::new(&context, &allocator, window)?;
 
-        // 1. Chargement des textures PBR réelles (Sable, Herbe, Roche, Neige)
-        println!("[Moteur] Chargement des textures PBR haute definition...");
+        // 1. Textures PBR réelles (Sable, Herbe, Roche, Neige)
+        println!("[Moteur] Chargement des textures PBR 1K...");
         let texture_array = VulkanTextureArray::load_terrain_textures(&context, &allocator)?;
 
-        // 2. Uniform Buffers pour chaque frame en vol
+        // 2. Uniform Buffers pour chaque trame en vol
         let uniform_size = std::mem::size_of::<CameraUniform>() as vk::DeviceSize;
         let mut uniform_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
@@ -57,29 +98,31 @@ impl VulkanRenderer {
             uniform_buffers.push(ubo);
         }
 
-        // 3. Pipeline graphique avec Shaders GLSL et Textures PBR
-        let pipeline = VulkanPipeline::new(&context, swapchain.render_pass, &uniform_buffers, &texture_array)?;
+        // 3. Pipelines graphiques optimisées
+        println!("[Moteur] Compilation des pipelines graphiques Vulkan...");
+        let terrain_pipeline = VulkanPipeline::new(&context, swapchain.render_pass, &uniform_buffers, &texture_array)?;
+        let vegetation_pipeline = VegetationPipeline::new(&context, swapchain.render_pass, &uniform_buffers)?;
+        let sky_pipeline = SkyPipeline::new(&context, swapchain.render_pass, &uniform_buffers)?;
+        let water_pipeline = WaterPipeline::new(&context, swapchain.render_pass, &uniform_buffers)?;
 
-        // 4. Génération du terrain procédural continu haute définition
-        println!("[Terrain] Generation du maillage continu autour du joueur...");
+        // 4. Génération du terrain procédural haute définition
+        println!("[Terrain] Generation du maillage continu (448m x 448m)...");
         let (vertices, indices) = world.build_world_mesh(0.0, 0.0);
-        let index_count = indices.len() as u32;
+        let terrain_index_count = indices.len() as u32;
         println!(
             "[Terrain] Maillage genere avec succes: {} sommets, {} triangles",
             vertices.len(),
             indices.len() / 3
         );
 
-        // 5. Transfert VRAM ultra-rapide (GpuOnly) via Staging Buffer
-        let vertex_buffer = GpuBuffer::create_device_local_with_data(
+        let terrain_vertex_buffer = GpuBuffer::create_device_local_with_data(
             &context,
             &allocator,
             "Terrain Vertex Buffer",
             vk::BufferUsageFlags::VERTEX_BUFFER,
             &vertices,
         )?;
-
-        let index_buffer = GpuBuffer::create_device_local_with_data(
+        let terrain_index_buffer = GpuBuffer::create_device_local_with_data(
             &context,
             &allocator,
             "Terrain Index Buffer",
@@ -87,14 +130,154 @@ impl VulkanRenderer {
             &indices,
         )?;
 
-        // 6. Allocation des Command Buffers
+        // 5. Génération du Dôme de ciel atmosphérique
+        println!("[Environnement] Generation du dome atmospherique...");
+        let sky_mesh = SkyMesh::create_sky_dome();
+        let sky_index_count = sky_mesh.indices.len() as u32;
+        let sky_vertex_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Sky Vertex Buffer",
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            &sky_mesh.vertices,
+        )?;
+        let sky_index_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Sky Index Buffer",
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            &sky_mesh.indices,
+        )?;
+
+        // 6. Génération de la surface de l'Océan
+        println!("[Environnement] Generation du plan d'eau anime...");
+        let water_mesh = WaterMesh::create_ocean_plane(0.0, 0.0, 520.0, 80, 1.0);
+        let water_index_count = water_mesh.indices.len() as u32;
+        let water_vertex_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Water Vertex Buffer",
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            &water_mesh.vertices,
+        )?;
+        let water_index_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Water Index Buffer",
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            &water_mesh.indices,
+        )?;
+
+        // 7. Modèles 3D de végétation
+        println!("[Vegetation] Creation des modeles 3D (Sapins, Arbres feuillus, Buissons)...");
+        let pine_mesh = VegetationMesh::create_pine_tree();
+        let pine_index_count = pine_mesh.indices.len() as u32;
+        let pine_vertex_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Pine Vertex Buffer",
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            &pine_mesh.vertices,
+        )?;
+        let pine_index_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Pine Index Buffer",
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            &pine_mesh.indices,
+        )?;
+
+        let broadleaf_mesh = VegetationMesh::create_broadleaf_tree();
+        let broadleaf_index_count = broadleaf_mesh.indices.len() as u32;
+        let broadleaf_vertex_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Broadleaf Vertex Buffer",
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            &broadleaf_mesh.vertices,
+        )?;
+        let broadleaf_index_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Broadleaf Index Buffer",
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            &broadleaf_mesh.indices,
+        )?;
+
+        let bush_mesh = VegetationMesh::create_bush();
+        let bush_index_count = bush_mesh.indices.len() as u32;
+        let bush_vertex_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Bush Vertex Buffer",
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            &bush_mesh.vertices,
+        )?;
+        let bush_index_buffer = GpuBuffer::create_device_local_with_data(
+            &context,
+            &allocator,
+            "Bush Index Buffer",
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            &bush_mesh.indices,
+        )?;
+
+        // 8. Implantation procédurale organique des instances
+        println!("[Vegetation] Implantation procedurale de la vegetation sur le terrain...");
+        let spawned = VegetationSpawner::spawn_for_world(&world.generator, 0.0, 0.0, 220.0, 1337);
+        let total_veg = spawned.pines.len() + spawned.broadleafs.len() + spawned.bushes.len();
+        println!(
+            "[Vegetation] Implantation terminee : {} sapins, {} arbres feuillus, {} buissons (Total: {} instances VRAM)",
+            spawned.pines.len(),
+            spawned.broadleafs.len(),
+            spawned.bushes.len(),
+            total_veg
+        );
+
+        let pine_instance_count = spawned.pines.len() as u32;
+        let pine_instance_buffer = if pine_instance_count > 0 {
+            Some(GpuBuffer::create_device_local_with_data(
+                &context,
+                &allocator,
+                "Pine Instances",
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                &spawned.pines,
+            )?)
+        } else {
+            None
+        };
+
+        let broadleaf_instance_count = spawned.broadleafs.len() as u32;
+        let broadleaf_instance_buffer = if broadleaf_instance_count > 0 {
+            Some(GpuBuffer::create_device_local_with_data(
+                &context,
+                &allocator,
+                "Broadleaf Instances",
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                &spawned.broadleafs,
+            )?)
+        } else {
+            None
+        };
+
+        let bush_instance_count = spawned.bushes.len() as u32;
+        let bush_instance_buffer = if bush_instance_count > 0 {
+            Some(GpuBuffer::create_device_local_with_data(
+                &context,
+                &allocator,
+                "Bush Instances",
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                &spawned.bushes,
+            )?)
+        } else {
+            None
+        };
+
+        // 9. Command Buffers et Synchronisation
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(context.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
         let command_buffers = unsafe { context.device.allocate_command_buffers(&alloc_info)? };
-
-        // 7. Synchronisation (Semaphores et Fences)
         let sync_objects = SyncObjects::new(&context, MAX_FRAMES_IN_FLIGHT)?;
 
         Ok(Self {
@@ -102,11 +285,35 @@ impl VulkanRenderer {
             allocator,
             swapchain,
             texture_array,
-            pipeline,
+            terrain_pipeline,
+            vegetation_pipeline,
+            sky_pipeline,
+            water_pipeline,
             uniform_buffers,
-            vertex_buffer,
-            index_buffer,
-            index_count,
+            terrain_vertex_buffer,
+            terrain_index_buffer,
+            terrain_index_count,
+            sky_vertex_buffer,
+            sky_index_buffer,
+            sky_index_count,
+            water_vertex_buffer,
+            water_index_buffer,
+            water_index_count,
+            pine_vertex_buffer,
+            pine_index_buffer,
+            pine_index_count,
+            pine_instance_buffer,
+            pine_instance_count,
+            broadleaf_vertex_buffer,
+            broadleaf_index_buffer,
+            broadleaf_index_count,
+            broadleaf_instance_buffer,
+            broadleaf_instance_count,
+            bush_vertex_buffer,
+            bush_index_buffer,
+            bush_index_count,
+            bush_instance_buffer,
+            bush_instance_count,
             command_buffers,
             sync_objects,
             current_frame: 0,
@@ -138,14 +345,14 @@ impl VulkanRenderer {
         let frame = self.current_frame;
 
         unsafe {
-            // Attente de la trame precedente
+            // Attente de la trame précédente
             self.context.device.wait_for_fences(
                 &[self.sync_objects.in_flight_fences[frame]],
                 true,
                 u64::MAX,
             )?;
 
-            // Acquisition de l'image suivante
+            // Acquisition de l'image de swapchain
             let image_index = match self.swapchain.swapchain_loader.acquire_next_image(
                 self.swapchain.swapchain,
                 u64::MAX,
@@ -162,10 +369,10 @@ impl VulkanRenderer {
 
             self.context.device.reset_fences(&[self.sync_objects.in_flight_fences[frame]])?;
 
-            // Mise a jour de l'Uniform Buffer camera
+            // Mise à jour de l'Uniform Buffer caméra
             self.uniform_buffers[frame].update_data(camera_uniform)?;
 
-            // Enregistrement des commandes
+            // Enregistrement des commandes graphiques
             let cmd = self.command_buffers[frame];
             self.context.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
 
@@ -173,7 +380,7 @@ impl VulkanRenderer {
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             self.context.device.begin_command_buffer(cmd, &begin_info)?;
 
-            // Ciel atmospherique en arriere-plan
+            // Fond atmosphérique et tampon de profondeur
             let clear_values = [
                 vk::ClearValue {
                     color: vk::ClearColorValue {
@@ -203,12 +410,7 @@ impl VulkanRenderer {
                 vk::SubpassContents::INLINE,
             );
 
-            self.context.device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.pipeline,
-            );
-
+            // Viewport et Scissor dynamiques
             let viewport = [vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -225,35 +427,195 @@ impl VulkanRenderer {
             }];
             self.context.device.cmd_set_scissor(cmd, 0, &scissor);
 
+            // -----------------------------------------------------------------
+            // PASSE 1 : Dôme de ciel atmosphérique avec diffusion Rayleigh & Mie
+            // -----------------------------------------------------------------
+            self.context.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.sky_pipeline.pipeline,
+            );
             self.context.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline.pipeline_layout,
+                self.sky_pipeline.pipeline_layout,
                 0,
-                &[self.pipeline.descriptor_sets[frame]],
+                &[self.sky_pipeline.descriptor_sets[frame]],
                 &[],
             );
-
             self.context.device.cmd_bind_vertex_buffers(
                 cmd,
                 0,
-                &[self.vertex_buffer.buffer],
+                &[self.sky_vertex_buffer.buffer],
                 &[0],
             );
             self.context.device.cmd_bind_index_buffer(
                 cmd,
-                self.index_buffer.buffer,
+                self.sky_index_buffer.buffer,
                 0,
                 vk::IndexType::UINT32,
             );
+            self.context.device.cmd_draw_indexed(cmd, self.sky_index_count, 1, 0, 0, 0);
 
-            // Rendu indexe du terrain
-            self.context.device.cmd_draw_indexed(cmd, self.index_count, 1, 0, 0, 0);
+            // -----------------------------------------------------------------
+            // PASSE 2 : Terrain procédural haute définition avec textures PBR 1K
+            // -----------------------------------------------------------------
+            self.context.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.terrain_pipeline.pipeline,
+            );
+            self.context.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.terrain_pipeline.pipeline_layout,
+                0,
+                &[self.terrain_pipeline.descriptor_sets[frame]],
+                &[],
+            );
+            self.context.device.cmd_bind_vertex_buffers(
+                cmd,
+                0,
+                &[self.terrain_vertex_buffer.buffer],
+                &[0],
+            );
+            self.context.device.cmd_bind_index_buffer(
+                cmd,
+                self.terrain_index_buffer.buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            self.context.device.cmd_draw_indexed(cmd, self.terrain_index_count, 1, 0, 0, 0);
+
+            // -----------------------------------------------------------------
+            // PASSE 3 : Végétation 3D instanciée avec balancement dynamique au vent
+            // -----------------------------------------------------------------
+            self.context.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.vegetation_pipeline.pipeline,
+            );
+            self.context.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.vegetation_pipeline.pipeline_layout,
+                0,
+                &[self.vegetation_pipeline.descriptor_sets[frame]],
+                &[],
+            );
+
+            // 3.1 Sapins (Conifères)
+            if self.pine_instance_count > 0 {
+                if let Some(ref inst_buf) = self.pine_instance_buffer {
+                    self.context.device.cmd_bind_vertex_buffers(
+                        cmd,
+                        0,
+                        &[self.pine_vertex_buffer.buffer, inst_buf.buffer],
+                        &[0, 0],
+                    );
+                    self.context.device.cmd_bind_index_buffer(
+                        cmd,
+                        self.pine_index_buffer.buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    self.context.device.cmd_draw_indexed(
+                        cmd,
+                        self.pine_index_count,
+                        self.pine_instance_count,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+            }
+
+            // 3.2 Arbres feuillus (Chênes / Bouleaux)
+            if self.broadleaf_instance_count > 0 {
+                if let Some(ref inst_buf) = self.broadleaf_instance_buffer {
+                    self.context.device.cmd_bind_vertex_buffers(
+                        cmd,
+                        0,
+                        &[self.broadleaf_vertex_buffer.buffer, inst_buf.buffer],
+                        &[0, 0],
+                    );
+                    self.context.device.cmd_bind_index_buffer(
+                        cmd,
+                        self.broadleaf_index_buffer.buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    self.context.device.cmd_draw_indexed(
+                        cmd,
+                        self.broadleaf_index_count,
+                        self.broadleaf_instance_count,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+            }
+
+            // 3.3 Buissons
+            if self.bush_instance_count > 0 {
+                if let Some(ref inst_buf) = self.bush_instance_buffer {
+                    self.context.device.cmd_bind_vertex_buffers(
+                        cmd,
+                        0,
+                        &[self.bush_vertex_buffer.buffer, inst_buf.buffer],
+                        &[0, 0],
+                    );
+                    self.context.device.cmd_bind_index_buffer(
+                        cmd,
+                        self.bush_index_buffer.buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    self.context.device.cmd_draw_indexed(
+                        cmd,
+                        self.bush_index_count,
+                        self.bush_instance_count,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // PASSE 4 : Océan / Plan d'eau animé (reflets Fresnel, écume, vagues)
+            // -----------------------------------------------------------------
+            self.context.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.water_pipeline.pipeline,
+            );
+            self.context.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.water_pipeline.pipeline_layout,
+                0,
+                &[self.water_pipeline.descriptor_sets[frame]],
+                &[],
+            );
+            self.context.device.cmd_bind_vertex_buffers(
+                cmd,
+                0,
+                &[self.water_vertex_buffer.buffer],
+                &[0],
+            );
+            self.context.device.cmd_bind_index_buffer(
+                cmd,
+                self.water_index_buffer.buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            self.context.device.cmd_draw_indexed(cmd, self.water_index_count, 1, 0, 0, 0);
 
             self.context.device.cmd_end_render_pass(cmd);
             self.context.device.end_command_buffer(cmd)?;
 
-            // Soumission
+            // Soumission de la trame
             let wait_semaphores = [self.sync_objects.image_available_semaphores[frame]];
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let signal_semaphores = [self.sync_objects.render_finished_semaphores[frame]];
@@ -271,7 +633,7 @@ impl VulkanRenderer {
                 self.sync_objects.in_flight_fences[frame],
             )?;
 
-            // Presentation
+            // Présentation à l'écran
             let swapchains = [self.swapchain.swapchain];
             let image_indices = [image_index];
             let present_info = vk::PresentInfoKHR::default()
@@ -304,13 +666,35 @@ impl VulkanRenderer {
             self.context.device.device_wait_idle().ok();
         }
         self.sync_objects.destroy(&self.context);
-        self.pipeline.destroy(&self.context);
+        self.terrain_pipeline.destroy(&self.context);
+        self.vegetation_pipeline.destroy(&self.context);
+        self.sky_pipeline.destroy(&self.context);
+        self.water_pipeline.destroy(&self.context);
         self.texture_array.destroy(&self.context, &self.allocator);
         for mut ubo in self.uniform_buffers.drain(..) {
             ubo.destroy(&self.context, &self.allocator);
         }
-        self.vertex_buffer.destroy(&self.context, &self.allocator);
-        self.index_buffer.destroy(&self.context, &self.allocator);
+        self.terrain_vertex_buffer.destroy(&self.context, &self.allocator);
+        self.terrain_index_buffer.destroy(&self.context, &self.allocator);
+        self.sky_vertex_buffer.destroy(&self.context, &self.allocator);
+        self.sky_index_buffer.destroy(&self.context, &self.allocator);
+        self.water_vertex_buffer.destroy(&self.context, &self.allocator);
+        self.water_index_buffer.destroy(&self.context, &self.allocator);
+        self.pine_vertex_buffer.destroy(&self.context, &self.allocator);
+        self.pine_index_buffer.destroy(&self.context, &self.allocator);
+        if let Some(mut b) = self.pine_instance_buffer.take() {
+            b.destroy(&self.context, &self.allocator);
+        }
+        self.broadleaf_vertex_buffer.destroy(&self.context, &self.allocator);
+        self.broadleaf_index_buffer.destroy(&self.context, &self.allocator);
+        if let Some(mut b) = self.broadleaf_instance_buffer.take() {
+            b.destroy(&self.context, &self.allocator);
+        }
+        self.bush_vertex_buffer.destroy(&self.context, &self.allocator);
+        self.bush_index_buffer.destroy(&self.context, &self.allocator);
+        if let Some(mut b) = self.bush_instance_buffer.take() {
+            b.destroy(&self.context, &self.allocator);
+        }
         self.swapchain.destroy(&self.context, &self.allocator);
     }
 }
@@ -433,19 +817,19 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last_time).as_secs_f32().min(0.1);
                 self.last_time = now;
 
-                // Mise a jour de la physique et de la camera
+                // Mise à jour de la physique et de la caméra
                 let world_ref = &self.terrain_world;
                 self.camera.update(dt, &mut self.input, |x, z| world_ref.sample_height(x, z));
 
-                // Compteur FPS dans le titre de fenetre
+                // Compteur FPS dans le titre de fenêtre
                 self.frame_count += 1;
                 if self.fps_timer.elapsed().as_secs_f32() >= 1.0 {
                     let fps = self.frame_count as f32 / self.fps_timer.elapsed().as_secs_f32();
                     let mode_str = if self.camera.is_freecam { "Flycam (Vol)" } else { "Marcheur FPS" };
-                    let mouse_y_str = if self.camera.invert_mouse_y { "Inversé" } else { "Normal" };
+                    let mouse_y_str = if self.camera.invert_mouse_y { "Inverse" } else { "Normal" };
                     if let Some(ref window) = self.window {
                         window.set_title(&format!(
-                            "Vulkan 3D World [PBR Textures HD] | FPS: {:.0} | Mode: {} (F) | Axe Y: {} (Touche 'I') | Pos: ({:.0}, {:.0}, {:.0})",
+                            "Vulkan 3D World [Vegetation & Ocean PBR] | FPS: {:.0} | Mode: {} (F) | Axe Y: {} (Touche 'I') | Pos: ({:.0}, {:.0}, {:.0})",
                             fps, mode_str, mouse_y_str, self.camera.position.x, self.camera.position.y, self.camera.position.z
                         ));
                     }

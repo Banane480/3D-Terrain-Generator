@@ -48,7 +48,7 @@ void main() {
 
     // Calcul de la pente pour projeter automatiquement la roche sur les parois abruptes
     float slope = 1.0 - clamp(dot(N, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
-    float rock_factor = smoothstep(0.28, 0.60, slope);
+    float rock_factor = smoothstep(0.28, 0.58, slope);
 
     // Melange continu selon les poids des biomes
     vec3 albedo = in_biome_weights.x * tex_sand
@@ -61,8 +61,8 @@ void main() {
 
     // Eclairage solaire directionnel + rebond atmospherique du ciel
     float NdotL = max(dot(N, L), 0.0);
-    vec3 sun_color = vec3(1.0, 0.96, 0.90) * 1.35;
-    vec3 sky_ambient = vec3(0.22, 0.32, 0.48) * 0.65;
+    vec3 sun_color = vec3(1.0, 0.96, 0.90) * 1.45;
+    vec3 sky_ambient = vec3(0.24, 0.35, 0.50) * 0.65;
     vec3 diffuse = sun_color * NdotL + sky_ambient;
 
     // Speculaire Blinn-Phong pour reflets d'eau / sable humide / neige
@@ -81,5 +81,10 @@ void main() {
     vec3 fog_color = vec3(0.68, 0.78, 0.90);
     final_color = mix(final_color, fog_color, clamp(fog_factor, 0.0, 0.95));
 
-    out_color = vec4(final_color, 1.0);
+    // ACES filmic tonemapping
+    vec3 a = final_color * (2.51 * final_color + 0.03);
+    vec3 b = final_color * (2.43 * final_color + 0.59) + 0.14;
+    vec3 mapped = clamp(a / b, 0.0, 1.0);
+
+    out_color = vec4(mapped, 1.0);
 }
