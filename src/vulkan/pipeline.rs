@@ -241,12 +241,25 @@ impl VegetationPipeline {
         ctx: &VulkanContext,
         render_pass: vk::RenderPass,
         uniform_buffers: &[GpuBuffer],
+        textures: &VulkanTextureArray,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let layout_bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
+        let layout_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&layout_bindings);
         let descriptor_set_layout = unsafe { ctx.device.create_descriptor_set_layout(&layout_info, None)? };
@@ -324,7 +337,28 @@ impl VegetationPipeline {
             ctx.device.destroy_shader_module(frag_module, None);
         }
 
-        let (descriptor_pool, descriptor_sets) = create_camera_descriptor_pool_and_sets(ctx, uniform_buffers, descriptor_set_layout)?;
+        let num_frames = uniform_buffers.len() as u32;
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(num_frames),
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(num_frames),
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::SAMPLER).descriptor_count(num_frames),
+        ];
+        let pool_info = vk::DescriptorPoolCreateInfo::default().pool_sizes(&pool_sizes).max_sets(num_frames);
+        let descriptor_pool = unsafe { ctx.device.create_descriptor_pool(&pool_info, None)? };
+        let layouts = vec![descriptor_set_layout; uniform_buffers.len()];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default().descriptor_pool(descriptor_pool).set_layouts(&layouts);
+        let descriptor_sets = unsafe { ctx.device.allocate_descriptor_sets(&alloc_info)? };
+        for (i, buffer) in uniform_buffers.iter().enumerate() {
+            let buffer_info = [vk::DescriptorBufferInfo::default().buffer(buffer.buffer).offset(0).range(buffer.size)];
+            let image_info = [vk::DescriptorImageInfo::default().image_view(textures.image_view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let sampler_info = [vk::DescriptorImageInfo::default().sampler(textures.sampler)];
+            let descriptor_writes = [
+                vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(0).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(&buffer_info),
+                vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(1).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&image_info),
+                vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(2).descriptor_type(vk::DescriptorType::SAMPLER).image_info(&sampler_info),
+            ];
+            unsafe { ctx.device.update_descriptor_sets(&descriptor_writes, &[]); }
+        }
 
         Ok(Self { descriptor_set_layout, descriptor_pool, descriptor_sets, pipeline_layout, pipeline })
     }

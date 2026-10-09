@@ -13,6 +13,8 @@ glam = { version = "0.29", features = ["bytemuck"] }
 bytemuck = { version = "1.21", features = ["derive"] }
 noise = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+gltf = "1.4"
+meshopt = "0.6.2"
 
 [build-dependencies]
 naga = { version = "24.0", features = ["glsl-in", "spv-out"], default-features = false }

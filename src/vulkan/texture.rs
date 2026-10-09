@@ -18,24 +18,28 @@ impl VulkanTextureArray {
         allocator: &GpuAllocator,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         const TEX_SIZE: u32 = 1024;
-        const NUM_LAYERS: u32 = 4;
+        const NUM_LAYERS: u32 = 8;
         let layer_byte_size = (TEX_SIZE * TEX_SIZE * 4) as usize;
         let total_byte_size = (layer_byte_size * NUM_LAYERS as usize) as vk::DeviceSize;
 
-        println!("[Texture] Chargement des 4 textures PBR 1K integrees...");
+        println!("[Texture] Chargement des 8 textures terrain/vegetation 1K...");
 
         // Inclusion directe dans le binaire pour garantir 100% de disponibilite quel que soit l'endroit ou est lance le .exe
-        let raw_images: [&[u8]; 4] = [
+        let raw_images: [&[u8]; 8] = [
             include_bytes!("../../assets/textures/sand/Ground054_1K-JPG_Color.jpg"),
             include_bytes!("../../assets/textures/grass/Ground037_1K-JPG_Color.jpg"),
             include_bytes!("../../assets/textures/rock/Rock020_1K-JPG_Color.jpg"),
             include_bytes!("../../assets/textures/snow/Snow006_1K-JPG_Color.jpg"),
+            include_bytes!("../../assets/models/vegetation/quaternius/glTF/Bark_NormalTree.png"),
+            include_bytes!("../../assets/models/vegetation/quaternius/glTF/Leaf_Pine_C.png"),
+            include_bytes!("../../assets/models/vegetation/quaternius/glTF/Leaves_NormalTree_C.png"),
+            include_bytes!("../../assets/models/vegetation/quaternius/glTF/Leaves_TwistedTree_C.png"),
         ];
 
         let mut pixel_data = Vec::with_capacity(layer_byte_size * NUM_LAYERS as usize);
 
         for (idx, bytes) in raw_images.iter().enumerate() {
-            println!("[Texture] Decodage couche {} (PBR 1024x1024)...", idx);
+            println!("[Texture] Decodage couche {} (1024x1024)...", idx);
             let img = image::load_from_memory(bytes)?;
             let resized = if img.width() != TEX_SIZE || img.height() != TEX_SIZE {
                 img.resize_exact(TEX_SIZE, TEX_SIZE, image::imageops::FilterType::Triangle)
@@ -46,7 +50,7 @@ impl VulkanTextureArray {
             pixel_data.extend_from_slice(&rgba);
         }
 
-        println!("[Texture] Toutes les textures PBR decodees avec succes ({} Mo)", pixel_data.len() / (1024 * 1024));
+        println!("[Texture] Toutes les textures decodees avec succes ({} Mo)", pixel_data.len() / (1024 * 1024));
 
         // 1. Staging Buffer CPU->GPU
         let (staging_buffer, staging_allocation) = allocator.allocate_buffer(

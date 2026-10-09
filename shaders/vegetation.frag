@@ -3,6 +3,7 @@
 layout(location = 0) in vec3 in_world_pos;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec4 in_color;
+layout(location = 3) in vec4 in_uv_layer;
 
 layout(set = 0, binding = 0) uniform CameraData {
     mat4 view_proj;
@@ -10,9 +11,15 @@ layout(set = 0, binding = 0) uniform CameraData {
     vec4 sun_dir;
 } camera;
 
+layout(set = 0, binding = 1) uniform texture2DArray u_textures;
+layout(set = 0, binding = 2) uniform sampler u_sampler;
+
 layout(location = 0) out vec4 out_color;
 
 void main() {
+    vec4 albedo = texture(sampler2DArray(u_textures, u_sampler), vec3(in_uv_layer.xy, in_uv_layer.z));
+    if (albedo.a < in_uv_layer.w) discard;
+
     vec3 N = normalize(in_normal);
     vec3 L = normalize(camera.sun_dir.xyz);
     vec3 V = normalize(camera.camera_pos.xyz - in_world_pos);
@@ -33,7 +40,7 @@ void main() {
     float NdotH = max(dot(N, H), 0.0);
     float spec = pow(NdotH, 32.0) * 0.20 * in_color.a;
 
-    vec3 final_color = in_color.rgb * diffuse + sun_color * spec;
+    vec3 final_color = in_color.rgb * albedo.rgb * diffuse + sun_color * spec;
 
     // Brouillard atmospherique
     float dist = length(camera.camera_pos.xyz - in_world_pos);

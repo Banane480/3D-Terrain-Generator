@@ -20,34 +20,34 @@ impl VegetationInstance {
 
     pub fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 5] {
         [
-            // location 3: model_col0 vec4
-            vk::VertexInputAttributeDescription::default()
-                .binding(1)
-                .location(3)
-                .format(vk::Format::R32G32B32A32_SFLOAT)
-                .offset(0),
-            // location 4: model_col1 vec4
+            // location 4: model_col0 vec4
             vk::VertexInputAttributeDescription::default()
                 .binding(1)
                 .location(4)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
-                .offset(16),
-            // location 5: model_col2 vec4
+                .offset(0),
+            // location 5: model_col1 vec4
             vk::VertexInputAttributeDescription::default()
                 .binding(1)
                 .location(5)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
-                .offset(32),
-            // location 6: model_col3 vec4
+                .offset(16),
+            // location 6: model_col2 vec4
             vk::VertexInputAttributeDescription::default()
                 .binding(1)
                 .location(6)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
-                .offset(48),
-            // location 7: variation vec4
+                .offset(32),
+            // location 7: model_col3 vec4
             vk::VertexInputAttributeDescription::default()
                 .binding(1)
                 .location(7)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(48),
+            // location 8: variation vec4
+            vk::VertexInputAttributeDescription::default()
+                .binding(1)
+                .location(8)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
                 .offset(64),
         ]

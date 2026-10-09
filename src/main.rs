@@ -5,7 +5,7 @@ mod terrain;
 mod vegetation;
 mod vulkan;
 
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 use ash::vk;
 use glam::Vec3;
 use winit::application::ApplicationHandler;
@@ -19,13 +19,93 @@ use crate::camera::{Camera, CameraUniform};
 use crate::environment::{SkyMesh, WaterMesh};
 use crate::input::InputState;
 use crate::terrain::TerrainWorld;
-use crate::vegetation::{VegetationMesh, VegetationSpawner};
+use crate::vegetation::{load_quaternius_lods, LoadedVegetation, VegetationInstance, VegetationSpawner};
 use crate::vulkan::{
     GpuAllocator, GpuBuffer, SkyPipeline, SyncObjects, VegetationPipeline,
     VulkanContext, VulkanPipeline, VulkanSwapchain, VulkanTextureArray, WaterPipeline,
 };
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
+struct VegetationLodGpu {
+    index_buffer: GpuBuffer,
+    index_count: u32,
+    instance_buffer: Option<GpuBuffer>,
+    instance_count: u32,
+}
+
+struct VegetationGpuMesh {
+    vertex_buffer: GpuBuffer,
+    lods: [VegetationLodGpu; 3],
+}
+
+impl VegetationGpuMesh {
+    unsafe fn draw(&self, context: &VulkanContext, cmd: vk::CommandBuffer) {
+        for lod in &self.lods {
+            let Some(instance_buffer) = &lod.instance_buffer else { continue };
+            context.device.cmd_bind_vertex_buffers(
+                cmd, 0, &[self.vertex_buffer.buffer, instance_buffer.buffer], &[0, 0],
+            );
+            context.device.cmd_bind_index_buffer(cmd, lod.index_buffer.buffer, 0, vk::IndexType::UINT32);
+            context.device.cmd_draw_indexed(cmd, lod.index_count, lod.instance_count, 0, 0, 0);
+        }
+    }
+
+    fn destroy(&mut self, context: &VulkanContext, allocator: &GpuAllocator) {
+        self.vertex_buffer.destroy(context, allocator);
+        for lod in &mut self.lods {
+            lod.index_buffer.destroy(context, allocator);
+            if let Some(mut buffer) = lod.instance_buffer.take() {
+                buffer.destroy(context, allocator);
+            }
+        }
+    }
+}
+
+fn upload_vegetation(
+    context: &VulkanContext,
+    allocator: &GpuAllocator,
+    name: &'static str,
+    loaded: LoadedVegetation,
+    instances: &[VegetationInstance],
+    thresholds: [f32; 2],
+) -> Result<VegetationGpuMesh, Box<dyn std::error::Error>> {
+    let vertex_buffer = GpuBuffer::create_device_local_with_data(
+        context, allocator, name, vk::BufferUsageFlags::VERTEX_BUFFER, &loaded.vertices,
+    )?;
+    let mut split: [Vec<VegetationInstance>; 3] = std::array::from_fn(|_| Vec::new());
+    for instance in instances {
+        let x = instance.model_col3[0];
+        let z = instance.model_col3[2];
+        // shortcut: LODs stay centered on this finite world's origin, rebuild buckets for streamed worlds.
+        let distance = (x * x + z * z).sqrt();
+        let lod = if distance < thresholds[0] { 0 } else if distance < thresholds[1] { 1 } else { 2 };
+        split[lod].push(*instance);
+    }
+    let mut index_sets = loaded.lod_indices.into_iter();
+    let mut instance_sets = split.into_iter();
+    let mut lods = Vec::with_capacity(3);
+    for lod in 0..3 {
+        let indices = index_sets.next().unwrap();
+        let instances = instance_sets.next().unwrap();
+        let index_buffer = GpuBuffer::create_device_local_with_data(
+            context, allocator, "Vegetation LOD Indices", vk::BufferUsageFlags::INDEX_BUFFER, &indices,
+        )?;
+        let instance_buffer = if instances.is_empty() { None } else {
+            Some(GpuBuffer::create_device_local_with_data(
+                context, allocator, "Vegetation LOD Instances", vk::BufferUsageFlags::VERTEX_BUFFER, &instances,
+            )?)
+        };
+        println!("[Vegetation] {name} LOD{lod}: {} triangles, {} instances", indices.len() / 3, instances.len());
+        lods.push(VegetationLodGpu {
+            index_buffer,
+            index_count: indices.len() as u32,
+            instance_buffer,
+            instance_count: instances.len() as u32,
+        });
+    }
+    Ok(VegetationGpuMesh { vertex_buffer, lods: lods.try_into().ok().unwrap() })
+}
 
 pub struct VulkanRenderer {
     pub context: VulkanContext,
@@ -53,26 +133,9 @@ pub struct VulkanRenderer {
     pub water_index_buffer: GpuBuffer,
     pub water_index_count: u32,
 
-    // Végétation instanciée (Sapins)
-    pub pine_vertex_buffer: GpuBuffer,
-    pub pine_index_buffer: GpuBuffer,
-    pub pine_index_count: u32,
-    pub pine_instance_buffer: Option<GpuBuffer>,
-    pub pine_instance_count: u32,
-
-    // Végétation instanciée (Arbres feuillus)
-    pub broadleaf_vertex_buffer: GpuBuffer,
-    pub broadleaf_index_buffer: GpuBuffer,
-    pub broadleaf_index_count: u32,
-    pub broadleaf_instance_buffer: Option<GpuBuffer>,
-    pub broadleaf_instance_count: u32,
-
-    // Végétation instanciée (Buissons)
-    pub bush_vertex_buffer: GpuBuffer,
-    pub bush_index_buffer: GpuBuffer,
-    pub bush_index_count: u32,
-    pub bush_instance_buffer: Option<GpuBuffer>,
-    pub bush_instance_count: u32,
+    pine_vegetation: VegetationGpuMesh,
+    broadleaf_vegetation: VegetationGpuMesh,
+    bush_vegetation: VegetationGpuMesh,
 
     pub command_buffers: Vec<vk::CommandBuffer>,
     pub sync_objects: SyncObjects,
@@ -101,7 +164,7 @@ impl VulkanRenderer {
         // 3. Pipelines graphiques optimisées
         println!("[Moteur] Compilation des pipelines graphiques Vulkan...");
         let terrain_pipeline = VulkanPipeline::new(&context, swapchain.render_pass, &uniform_buffers, &texture_array)?;
-        let vegetation_pipeline = VegetationPipeline::new(&context, swapchain.render_pass, &uniform_buffers)?;
+        let vegetation_pipeline = VegetationPipeline::new(&context, swapchain.render_pass, &uniform_buffers, &texture_array)?;
         let sky_pipeline = SkyPipeline::new(&context, swapchain.render_pass, &uniform_buffers)?;
         let water_pipeline = WaterPipeline::new(&context, swapchain.render_pass, &uniform_buffers)?;
 
@@ -168,60 +231,7 @@ impl VulkanRenderer {
             &water_mesh.indices,
         )?;
 
-        // 7. Modèles 3D de végétation
-        println!("[Vegetation] Creation des modeles 3D (Sapins, Arbres feuillus, Buissons)...");
-        let pine_mesh = VegetationMesh::create_pine_tree();
-        let pine_index_count = pine_mesh.indices.len() as u32;
-        let pine_vertex_buffer = GpuBuffer::create_device_local_with_data(
-            &context,
-            &allocator,
-            "Pine Vertex Buffer",
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            &pine_mesh.vertices,
-        )?;
-        let pine_index_buffer = GpuBuffer::create_device_local_with_data(
-            &context,
-            &allocator,
-            "Pine Index Buffer",
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            &pine_mesh.indices,
-        )?;
-
-        let broadleaf_mesh = VegetationMesh::create_broadleaf_tree();
-        let broadleaf_index_count = broadleaf_mesh.indices.len() as u32;
-        let broadleaf_vertex_buffer = GpuBuffer::create_device_local_with_data(
-            &context,
-            &allocator,
-            "Broadleaf Vertex Buffer",
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            &broadleaf_mesh.vertices,
-        )?;
-        let broadleaf_index_buffer = GpuBuffer::create_device_local_with_data(
-            &context,
-            &allocator,
-            "Broadleaf Index Buffer",
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            &broadleaf_mesh.indices,
-        )?;
-
-        let bush_mesh = VegetationMesh::create_bush();
-        let bush_index_count = bush_mesh.indices.len() as u32;
-        let bush_vertex_buffer = GpuBuffer::create_device_local_with_data(
-            &context,
-            &allocator,
-            "Bush Vertex Buffer",
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            &bush_mesh.vertices,
-        )?;
-        let bush_index_buffer = GpuBuffer::create_device_local_with_data(
-            &context,
-            &allocator,
-            "Bush Index Buffer",
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            &bush_mesh.indices,
-        )?;
-
-        // 8. Implantation procédurale organique des instances
+        // 7. Implantation procédurale et modèles Quaternius CC0 avec LOD
         println!("[Vegetation] Implantation procedurale de la vegetation sur le terrain...");
         let spawned = VegetationSpawner::spawn_for_world(&world.generator, 0.0, 0.0, 220.0, 1337);
         let total_veg = spawned.pines.len() + spawned.broadleafs.len() + spawned.bushes.len();
@@ -233,44 +243,19 @@ impl VulkanRenderer {
             total_veg
         );
 
-        let pine_instance_count = spawned.pines.len() as u32;
-        let pine_instance_buffer = if pine_instance_count > 0 {
-            Some(GpuBuffer::create_device_local_with_data(
-                &context,
-                &allocator,
-                "Pine Instances",
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                &spawned.pines,
-            )?)
-        } else {
-            None
-        };
-
-        let broadleaf_instance_count = spawned.broadleafs.len() as u32;
-        let broadleaf_instance_buffer = if broadleaf_instance_count > 0 {
-            Some(GpuBuffer::create_device_local_with_data(
-                &context,
-                &allocator,
-                "Broadleaf Instances",
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                &spawned.broadleafs,
-            )?)
-        } else {
-            None
-        };
-
-        let bush_instance_count = spawned.bushes.len() as u32;
-        let bush_instance_buffer = if bush_instance_count > 0 {
-            Some(GpuBuffer::create_device_local_with_data(
-                &context,
-                &allocator,
-                "Bush Instances",
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                &spawned.bushes,
-            )?)
-        } else {
-            None
-        };
+        let asset_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/models/vegetation/quaternius/glTF");
+        let pine_vegetation = upload_vegetation(
+            &context, &allocator, "Quaternius Pine", load_quaternius_lods(&asset_dir.join("Pine_1.gltf"), 10.5)?,
+            &spawned.pines, [55.0, 130.0],
+        )?;
+        let broadleaf_vegetation = upload_vegetation(
+            &context, &allocator, "Quaternius Broadleaf", load_quaternius_lods(&asset_dir.join("CommonTree_1.gltf"), 8.0)?,
+            &spawned.broadleafs, [50.0, 120.0],
+        )?;
+        let bush_vegetation = upload_vegetation(
+            &context, &allocator, "Quaternius Bush", load_quaternius_lods(&asset_dir.join("Bush_Common.gltf"), 1.8)?,
+            &spawned.bushes, [30.0, 75.0],
+        )?;
 
         // 9. Command Buffers et Synchronisation
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -299,21 +284,9 @@ impl VulkanRenderer {
             water_vertex_buffer,
             water_index_buffer,
             water_index_count,
-            pine_vertex_buffer,
-            pine_index_buffer,
-            pine_index_count,
-            pine_instance_buffer,
-            pine_instance_count,
-            broadleaf_vertex_buffer,
-            broadleaf_index_buffer,
-            broadleaf_index_count,
-            broadleaf_instance_buffer,
-            broadleaf_instance_count,
-            bush_vertex_buffer,
-            bush_index_buffer,
-            bush_index_count,
-            bush_instance_buffer,
-            bush_instance_count,
+            pine_vegetation,
+            broadleaf_vegetation,
+            bush_vegetation,
             command_buffers,
             sync_objects,
             current_frame: 0,
@@ -504,83 +477,9 @@ impl VulkanRenderer {
                 &[],
             );
 
-            // 3.1 Sapins (Conifères)
-            if self.pine_instance_count > 0 {
-                if let Some(ref inst_buf) = self.pine_instance_buffer {
-                    self.context.device.cmd_bind_vertex_buffers(
-                        cmd,
-                        0,
-                        &[self.pine_vertex_buffer.buffer, inst_buf.buffer],
-                        &[0, 0],
-                    );
-                    self.context.device.cmd_bind_index_buffer(
-                        cmd,
-                        self.pine_index_buffer.buffer,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    self.context.device.cmd_draw_indexed(
-                        cmd,
-                        self.pine_index_count,
-                        self.pine_instance_count,
-                        0,
-                        0,
-                        0,
-                    );
-                }
-            }
-
-            // 3.2 Arbres feuillus (Chênes / Bouleaux)
-            if self.broadleaf_instance_count > 0 {
-                if let Some(ref inst_buf) = self.broadleaf_instance_buffer {
-                    self.context.device.cmd_bind_vertex_buffers(
-                        cmd,
-                        0,
-                        &[self.broadleaf_vertex_buffer.buffer, inst_buf.buffer],
-                        &[0, 0],
-                    );
-                    self.context.device.cmd_bind_index_buffer(
-                        cmd,
-                        self.broadleaf_index_buffer.buffer,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    self.context.device.cmd_draw_indexed(
-                        cmd,
-                        self.broadleaf_index_count,
-                        self.broadleaf_instance_count,
-                        0,
-                        0,
-                        0,
-                    );
-                }
-            }
-
-            // 3.3 Buissons
-            if self.bush_instance_count > 0 {
-                if let Some(ref inst_buf) = self.bush_instance_buffer {
-                    self.context.device.cmd_bind_vertex_buffers(
-                        cmd,
-                        0,
-                        &[self.bush_vertex_buffer.buffer, inst_buf.buffer],
-                        &[0, 0],
-                    );
-                    self.context.device.cmd_bind_index_buffer(
-                        cmd,
-                        self.bush_index_buffer.buffer,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    self.context.device.cmd_draw_indexed(
-                        cmd,
-                        self.bush_index_count,
-                        self.bush_instance_count,
-                        0,
-                        0,
-                        0,
-                    );
-                }
-            }
+            self.pine_vegetation.draw(&self.context, cmd);
+            self.broadleaf_vegetation.draw(&self.context, cmd);
+            self.bush_vegetation.draw(&self.context, cmd);
 
             // -----------------------------------------------------------------
             // PASSE 4 : Océan / Plan d'eau animé (reflets Fresnel, écume, vagues)
@@ -680,21 +579,9 @@ impl VulkanRenderer {
         self.sky_index_buffer.destroy(&self.context, &self.allocator);
         self.water_vertex_buffer.destroy(&self.context, &self.allocator);
         self.water_index_buffer.destroy(&self.context, &self.allocator);
-        self.pine_vertex_buffer.destroy(&self.context, &self.allocator);
-        self.pine_index_buffer.destroy(&self.context, &self.allocator);
-        if let Some(mut b) = self.pine_instance_buffer.take() {
-            b.destroy(&self.context, &self.allocator);
-        }
-        self.broadleaf_vertex_buffer.destroy(&self.context, &self.allocator);
-        self.broadleaf_index_buffer.destroy(&self.context, &self.allocator);
-        if let Some(mut b) = self.broadleaf_instance_buffer.take() {
-            b.destroy(&self.context, &self.allocator);
-        }
-        self.bush_vertex_buffer.destroy(&self.context, &self.allocator);
-        self.bush_index_buffer.destroy(&self.context, &self.allocator);
-        if let Some(mut b) = self.bush_instance_buffer.take() {
-            b.destroy(&self.context, &self.allocator);
-        }
+        self.pine_vegetation.destroy(&self.context, &self.allocator);
+        self.broadleaf_vegetation.destroy(&self.context, &self.allocator);
+        self.bush_vegetation.destroy(&self.context, &self.allocator);
         self.swapchain.destroy(&self.context, &self.allocator);
     }
 }
